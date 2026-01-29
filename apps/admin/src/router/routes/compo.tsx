@@ -1,6 +1,4 @@
 import { lazy } from '@loadable/component';
-import { t } from 'i18next';
-import { useTranslation } from 'react-i18next';
 
 import LazyLoad from '@/components/LazyLoad';
 
@@ -98,10 +96,37 @@ const CompoRoute: RouteObject = {
     {
       path: 'point-cloud-viewer',
       name: 'PointCloudViewer',
-      element: LazyLoad(lazy(() => import('@/views/compo/point-cloud-viewer'))),
+      element: LazyLoad(lazy(() => import('@/views/compo/point-cloud'))),
       meta: {
         title: '点云渲染',
         key: 'pointCloudViewer',
+      },
+    },
+    {
+      path: 'point-cloud-lod',
+      name: 'PointCloudLod',
+      element: LazyLoad(lazy(() => import('@/views/compo/point-cloud-lod'))),
+      meta: {
+        title: '海量点云模拟-LOD',
+        key: 'pointCloudLod',
+      },
+    },
+    {
+      path: 'point-cloud-mesh',
+      name: 'PointCloudMesh',
+      element: LazyLoad(lazy(() => import('@/views/compo/point-cloud-mesh'))),
+      meta: {
+        title: '点云网格化',
+        key: 'pointCloudMesh',
+      },
+    },
+    {
+      path: 'point-cloud-mesh-collision',
+      name: 'PointCloudMeshCollision',
+      element: LazyLoad(lazy(() => import('@/views/compo/point-cloud-mesh-collision'))),
+      meta: {
+        title: '点云网格化-碰撞',
+        key: 'pointCloudMeshCollision',
       },
     },
     {
@@ -118,7 +143,7 @@ const CompoRoute: RouteObject = {
       name: 'RobotViewer',
       element: LazyLoad(lazy(() => import('@/views/compo/robot-viewer'))),
       meta: {
-        title: '机器人查看器',
+        title: '机器人编辑器',
         key: 'robotViewer',
       },
     },

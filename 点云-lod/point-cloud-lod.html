@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>2亿点云 - 八叉树 LOD + 视锥剔除</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0a0e13;
+      color: #e6e6e6;
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+
+    #app {
+      width: 100%;
+      height: 100%;
+      position: relative;
+    }
+
+    #canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    #hud {
+      position: absolute;
+      left: 12px;
+      top: 12px;
+      z-index: 10;
+      background: rgba(10, 14, 19, 0.92);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      padding: 12px 14px;
+      min-width: 280px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+      backdrop-filter: blur(8px);
+    }
+
+    #hud .title {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: #7dd3fc;
+    }
+
+    #hud .row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+      align-items: center;
+    }
+
+    #hud button,
+    #hud select,
+    #hud input {
+      flex: 1;
+      padding: 6px 10px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 6px;
+      background: #111827;
+      color: #dce6f3;
+      cursor: pointer;
+      font-size: 12px;
+      transition: all 0.15s ease;
+    }
+
+    #hud input[type="range"] {
+      cursor: ew-resize;
+    }
+
+    #hud button.active {
+      background: #1e3a5f;
+      border-color: #3b82f6;
+    }
+
+    #hud button:hover,
+    #hud select:hover {
+      border-color: #3b82f6;
+    }
+
+    #info {
+      font-size: 11px;
+      color: #9ca3af;
+      line-height: 1.7;
+      background: rgba(0, 0, 0, 0.3);
+      padding: 8px;
+      border-radius: 6px;
+      width: 256px;
+    }
+
+    #info .row {
+      display: flex;
+      justify-content: space-between;
+    }
+
+    #info .value {
+      text-align: right;
+      min-width: 120px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    #info .highlight {
+      color: #fbbf24;
+      font-weight: 500;
+    }
+
+    #hint {
+      margin-top: 8px;
+      font-size: 11px;
+      color: #6b7280;
+    }
+
+    #selectRect {
+      position: absolute;
+      border: 1px dashed #60a5fa;
+      background: rgba(59, 130, 246, 0.1);
+      pointer-events: none;
+      display: none;
+      z-index: 9;
+    }
+
+    .label {
+      font-size: 11px;
+      color: #9ca3af;
+      min-width: 70px;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="app">
+    <canvas id="canvas"></canvas>
+    <div id="selectRect"></div>
+    <div id="hud">
+      <div class="title">2亿点云 - 八叉树 LOD</div>
+      <div class="row">
+        <span class="label">总点数</span>
+        <select id="totalPointsSelect">
+          <option value="10000000">1000万</option>
+          <option value="50000000">5000万</option>
+          <option value="100000000">1亿</option>
+          <option value="200000000" selected>2亿</option>
+        </select>
+        <button id="rebuildBtn">重建</button>
+      </div>
+      <div class="row">
+        <span class="label">Point Budget</span>
+        <input type="range" id="budgetSlider" min="1000000" max="10000000" step="500000" value="5000000" />
+        <span id="budgetValue" style="min-width:50px;text-align:right;">500万</span>
+      </div>
+      <div class="row">
+        <span class="label">SSE阈值</span>
+        <input type="range" id="sseSlider" min="0.5" max="5" step="0.1" value="1.5" />
+        <span id="sseValue" style="min-width:40px;text-align:right;">1.5</span>
+      </div>
+      <div class="row">
+        <button id="selectToggle" class="active">框选：开</button>
+        <button id="clearSelection">清空选中</button>
+      </div>
+      <div class="row">
+        <button id="showOctreeToggle">显示八叉树</button>
+        <button id="freezeLodToggle">冻结LOD</button>
+      </div>
+      <div id="info">
+        <div class="row"><span>总点数</span><span class="value highlight" id="infoTotal">0</span></div>
+        <div class="row"><span>可见节点</span><span class="value"><span id="infoVisibleNodes">0</span> / <span
+              id="infoTotalNodes">0</span></span></div>
+        <div class="row"><span>渲染点数</span><span class="value"><span class="highlight" id="infoRendered">0</span> / <span
+              id="infoBudget">0</span></span></div>
+        <div class="row"><span>已加载节点</span><span class="value"><span id="infoLoaded">0</span> (<span
+              id="infoMemory">0</span> MB)</span></div>
+        <div class="row"><span>选中点数</span><span class="value" id="infoSelected">0</span></div>
+        <div class="row"><span>FPS</span><span class="value highlight" id="infoFps">0</span></div>
+      </div>
+      <div id="hint">左键拖拽框选 | 右键/滚轮旋转缩放 | 滚轮靠近触发 LOD 细化</div>
+    </div>
+  </div>
+
+  <script type="importmap">
+    { "imports": { "three": "https://unpkg.com/three@0.155.0/build/three.module.js", "three/examples/jsm/": "https://unpkg.com/three@0.155.0/examples/jsm/" } }
+  </script>
+  <script type="module" src="./point-cloud-lod.js"></script>
+</body>
+
+</html>
