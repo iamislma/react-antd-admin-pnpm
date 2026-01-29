@@ -1,10 +1,17 @@
 /* eslint-disable import/no-extraneous-dependencies */
 import { defineApplicationConfig } from '@gbeata/vite-config';
+import path from 'node:path';
 
 export default defineApplicationConfig({
   overrides: {
+    resolve: {
+      alias: {
+        // 确保所有 three.js 导入使用同一个实例
+        three: path.resolve(__dirname, 'node_modules/three'),
+      },
+    },
     optimizeDeps: {
-      include: ['@iconify/react', 'lodash-es', 'echarts', 'echarts-for-react'],
+      include: ['@iconify/react', 'lodash-es', 'echarts', 'echarts-for-react', 'three'],
     },
     server: {
       // Listening on all local ips

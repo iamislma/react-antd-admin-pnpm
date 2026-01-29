@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>点云网格化 - WebGPU GPU Marching Cubes</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0a0d12;
+      color: #e0e6ed;
+      overflow: hidden;
+    }
+
+    #canvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    .ui-panel {
+      position: fixed;
+      background: rgba(15, 20, 30, 0.85);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(100, 150, 255, 0.15);
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+
+    .control-panel {
+      top: 20px;
+      left: 20px;
+      width: 280px;
+    }
+
+    .info-panel {
+      top: 20px;
+      right: 20px;
+      min-width: 200px;
+    }
+
+    .mesh-panel {
+      bottom: 20px;
+      left: 20px;
+      width: 280px;
+    }
+
+    h3 {
+      font-size: 14px;
+      color: #8af;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(100, 150, 255, 0.2);
+    }
+
+    .control-group {
+      margin-bottom: 12px;
+    }
+
+    .control-group label {
+      display: block;
+      font-size: 12px;
+      color: #8899aa;
+      margin-bottom: 4px;
+    }
+
+    .control-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    input[type="range"] {
+      flex: 1;
+      height: 6px;
+      background: rgba(100, 150, 255, 0.2);
+      border-radius: 3px;
+      outline: none;
+      -webkit-appearance: none;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      background: linear-gradient(135deg, #6af, #48f);
+      border-radius: 50%;
+      cursor: pointer;
+    }
+
+    .value-display {
+      min-width: 45px;
+      text-align: right;
+      font-size: 12px;
+      color: #6af;
+      font-weight: 600;
+    }
+
+    select {
+      width: 100%;
+      padding: 8px;
+      background: rgba(30, 40, 60, 0.8);
+      border: 1px solid rgba(100, 150, 255, 0.2);
+      border-radius: 6px;
+      color: #e0e6ed;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .shape-buttons {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .shape-btn {
+      padding: 8px 4px;
+      background: rgba(30, 40, 60, 0.6);
+      border: 1px solid rgba(100, 150, 255, 0.2);
+      border-radius: 6px;
+      color: #aabbcc;
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .shape-btn:hover {
+      background: rgba(50, 70, 100, 0.6);
+      border-color: rgba(100, 150, 255, 0.4);
+    }
+
+    .shape-btn.active {
+      background: linear-gradient(135deg, rgba(80, 120, 200, 0.4), rgba(60, 100, 180, 0.4));
+      border-color: #6af;
+      color: #fff;
+    }
+
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(100, 150, 255, 0.1);
+    }
+
+    .info-label {
+      color: #8899aa;
+    }
+
+    .info-value {
+      color: #6af;
+      font-weight: 600;
+    }
+
+    .mesh-toggle {
+      width: 100%;
+      padding: 10px;
+      background: linear-gradient(135deg, rgba(60, 80, 120, 0.6), rgba(40, 60, 100, 0.6));
+      border: 1px solid rgba(100, 150, 255, 0.3);
+      border-radius: 8px;
+      color: #e0e6ed;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+      margin-bottom: 12px;
+    }
+
+    .mesh-toggle:hover {
+      background: linear-gradient(135deg, rgba(80, 100, 140, 0.7), rgba(60, 80, 120, 0.7));
+    }
+
+    .mesh-toggle.active {
+      background: linear-gradient(135deg, rgba(100, 180, 100, 0.5), rgba(60, 140, 80, 0.5));
+      border-color: #6c6;
+    }
+
+    .rebuild-btn {
+      width: 100%;
+      padding: 8px;
+      background: rgba(100, 150, 255, 0.2);
+      border: 1px solid rgba(100, 150, 255, 0.3);
+      border-radius: 6px;
+      color: #8af;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-bottom: 12px;
+    }
+
+    .rebuild-btn:hover {
+      background: rgba(100, 150, 255, 0.3);
+    }
+
+    .tech-badge {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: rgba(15, 20, 30, 0.85);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(100, 150, 255, 0.15);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 11px;
+      color: #6af;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="canvas"></canvas>
+
+  <!-- 控制面板 -->
+  <div class="ui-panel control-panel">
+    <h3>点云形态</h3>
+    <div id="shapeButtons" class="shape-buttons"></div>
+
+    <div class="control-group">
+      <label>点数量</label>
+      <div class="control-row">
+        <input type="range" id="countSlider" min="10000" max="2000000" step="10000" value="500000">
+        <span class="value-display" id="countValue">50万</span>
+      </div>
+    </div>
+
+    <div class="control-group">
+      <label>点大小</label>
+      <div class="control-row">
+        <input type="range" id="sizeSlider" min="0.5" max="5" step="0.1" value="1.5">
+        <span class="value-display" id="sizeValue">1.5</span>
+      </div>
+    </div>
+
+    <div class="control-group">
+      <label>动画速度</label>
+      <div class="control-row">
+        <input type="range" id="speedSlider" min="0" max="2" step="0.1" value="0.5">
+        <span class="value-display" id="speedValue">0.5</span>
+      </div>
+    </div>
+
+    <div class="control-group">
+      <label>颜色方案</label>
+      <select id="colorScheme">
+        <option value="0">位置映射</option>
+        <option value="1">法线映射</option>
+        <option value="2">高度映射</option>
+        <option value="3">径向渐变</option>
+        <option value="4">彩虹</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- 信息面板 -->
+  <div class="ui-panel info-panel">
+    <h3>渲染信息</h3>
+    <div class="info-row">
+      <span class="info-label">形态</span>
+      <span class="info-value" id="infoShape">球体</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">点数</span>
+      <span class="info-value" id="infoCount">-</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">生成耗时</span>
+      <span class="info-value"><span id="infoGenTime">-</span> ms</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">渲染模式</span>
+      <span class="info-value" id="infoRenderMode">-</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">FPS</span>
+      <span class="info-value" id="infoFps">-</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Draw Calls</span>
+      <span class="info-value" id="infoDrawCalls">-</span>
+    </div>
+    <div class="info-row" style="margin-top: 8px; border-top: 1px solid rgba(100,150,255,0.2); padding-top: 8px;">
+      <span class="info-label">网格状态</span>
+      <span class="info-value" id="infoMesh">-</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">三角形数</span>
+      <span class="info-value" id="infoTriangles">-</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">计算耗时</span>
+      <span class="info-value" id="infoComputeTime">-</span>
+    </div>
+  </div>
+
+  <!-- 网格重建面板 -->
+  <div class="ui-panel mesh-panel">
+    <h3>GPU 网格重建 (Marching Cubes)</h3>
+    <button id="meshToggle" class="mesh-toggle">网格：关</button>
+    <button id="rebuildMesh" class="rebuild-btn">重新生成网格</button>
+
+    <div class="control-group">
+      <label>网格分辨率</label>
+      <div class="control-row">
+        <input type="range" id="gridResSlider" min="16" max="128" step="8" value="64">
+        <span class="value-display" id="gridResValue">64</span>
+      </div>
+    </div>
+
+    <div class="control-group">
+      <label>ISO 阈值</label>
+      <div class="control-row">
+        <input type="range" id="isoValueSlider" min="0.1" max="0.9" step="0.05" value="0.5">
+        <span class="value-display" id="isoValueValue">0.50</span>
+      </div>
+    </div>
+
+    <div class="control-group">
+      <label>Splat 半径</label>
+      <div class="control-row">
+        <input type="range" id="splatRadiusSlider" min="0.5" max="5" step="0.1" value="2.0">
+        <span class="value-display" id="splatRadiusValue">2.0</span>
+      </div>
+    </div>
+
+    <div class="control-group">
+      <label>网格透明度</label>
+      <div class="control-row">
+        <input type="range" id="meshOpacitySlider" min="0.1" max="1" step="0.1" value="0.9">
+        <span class="value-display" id="meshOpacityValue">0.9</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 技术标签 -->
+  <div class="tech-badge">
+    WebGPU + TSL + Marching Cubes
+  </div>
+
+  <!-- 导入映射 -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.171.0/build/three.webgpu.js",
+        "three/addons/": "https://unpkg.com/three@0.171.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <!-- 主模块入口 -->
+  <script type="module" src="./point-cloud-shapes.js"></script>
+</body>
+
+</html>
