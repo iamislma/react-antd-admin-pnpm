@@ -30,7 +30,7 @@ group:
 
 ### 基础用法
 
-```tsx
+```tsx | pure
 import { Loading } from 'ui';
 
 <Loading tip="加载中..." />
@@ -38,7 +38,7 @@ import { Loading } from 'ui';
 
 ### 不同尺寸
 
-```tsx
+```tsx | pure
 <Loading size="small" />
 <Loading size="default" />
 <Loading size="large" />
@@ -46,13 +46,13 @@ import { Loading } from 'ui';
 
 ### 自定义颜色
 
-```tsx
+```tsx | pure
 <Loading color="#52c41a" />
 ```
 
 ### 包裹内容
 
-```tsx
+```tsx | pure
 <Loading loading={isLoading}>
   <div>内容区域</div>
 </Loading>
@@ -60,6 +60,6 @@ import { Loading } from 'ui';
 
 ### 全屏加载
 
-```tsx
+```tsx | pure
 <Loading loading={true} fullscreen tip="请稍候..." />
 ```

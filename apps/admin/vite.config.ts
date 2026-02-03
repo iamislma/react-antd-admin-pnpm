@@ -1,6 +1,7 @@
 /* eslint-disable import/no-extraneous-dependencies */
-import { defineApplicationConfig } from '@gbeata/vite-config';
 import path from 'node:path';
+
+import { defineApplicationConfig } from '@gbeata/vite-config';
 
 export default defineApplicationConfig({
   overrides: {

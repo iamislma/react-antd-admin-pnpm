@@ -121,15 +121,6 @@ const CompoRoute: RouteObject = {
       },
     },
     {
-      path: 'point-cloud-mesh-collision',
-      name: 'PointCloudMeshCollision',
-      element: LazyLoad(lazy(() => import('@/views/compo/point-cloud-mesh-collision'))),
-      meta: {
-        title: '点云网格化-碰撞',
-        key: 'pointCloudMeshCollision',
-      },
-    },
-    {
       path: 'flow-editor',
       name: 'FlowEditor',
       element: LazyLoad(lazy(() => import('@/views/compo/flow-editor'))),

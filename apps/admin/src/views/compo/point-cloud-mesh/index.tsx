@@ -1,7 +1,9 @@
 /* eslint-disable no-plusplus, @typescript-eslint/no-explicit-any */
 /**
- * 点云网格化组件
- * 使用 WebGPU 和 GPU Marching Cubes 进行点云到网格的转换
+ * 点云网格化组件 (WebGL + CPU Marching Cubes)
+ *
+ * 使用 Three.js ShaderMaterial 在 GPU 上渲染点云，
+ * 使用 CPU Marching Cubes 进行网格重建
  */
 
 import {
@@ -11,14 +13,23 @@ import {
   PlayCircleOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
-import { Button, InputNumber, Radio, Select, Slider, Space, Switch, Tooltip, Typography } from 'antd';
+import { Button, InputNumber, Radio, Select, Slider, Space, Switch, Typography } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
-import { MeshReconstructor, type ReconstructResult } from './meshReconstructor';
-import { generatePointCloudData } from './pointCloudCpu';
-import { COLOR_SCHEMES, type ColorScheme, DEFAULT_CONFIG, getShapeKeys, type ShapeKey, SHAPES } from './shapesConfig';
+import { CPUMarchingCubes, type MarchingCubesResult } from './cpuMarchingCubes';
+import { pointCloudFragmentShader, pointCloudVertexShader } from './glslShaders';
+import { generatePointCloudData, generateRandomSeeds } from './pointGenerator';
+import {
+  COLOR_SCHEMES,
+  type ColorScheme,
+  DEFAULT_CONFIG,
+  getShapeIndex,
+  getShapeKeys,
+  type ShapeKey,
+  SHAPES,
+} from './shapesConfig';
 import { useStyles } from './styles';
 
 const { Text } = Typography;
@@ -30,7 +41,8 @@ interface Stats {
   pointCount: number;
   triangleCount: number;
   computeTime: number;
-  webgpuSupported: boolean;
+  drawCalls: number;
+  genTime: number;
 }
 
 /** 点云网格化组件 */
@@ -43,11 +55,26 @@ export default function PointCloudMesh() {
   const controlsRef = useRef<OrbitControls | null>(null);
   const pointCloudRef = useRef<THREE.Points | null>(null);
   const meshRef = useRef<THREE.Mesh | null>(null);
-  const reconstructorRef = useRef<MeshReconstructor | null>(null);
   const animationRef = useRef<number>(0);
-  const clockRef = useRef<THREE.Clock>(new THREE.Clock());
   const frameCountRef = useRef(0);
   const lastFpsTimeRef = useRef(0);
+  const timeRef = useRef(0);
+
+  // 点云基础数据
+  const basePositionsRef = useRef<Float32Array | null>(null);
+  const randomsRef = useRef<Float32Array | null>(null);
+
+  // uniforms 引用
+  const uniformsRef = useRef<{
+    uTime: { value: number };
+    uSize: { value: number };
+    uAnimSpeed: { value: number };
+    uShape: { value: number };
+    uColorScheme: { value: number };
+  } | null>(null);
+
+  // 网格重建器
+  const reconstructorRef = useRef<CPUMarchingCubes | null>(null);
 
   // 状态
   const [shape, setShape] = useState<ShapeKey>('sphere');
@@ -62,12 +89,14 @@ export default function PointCloudMesh() {
   const [viewMode, setViewMode] = useState<ViewMode>('points');
   const [autoRotate, setAutoRotate] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
+  const [isRebuilding, setIsRebuilding] = useState(false);
   const [stats, setStats] = useState<Stats>({
     fps: 0,
     pointCount: 0,
     triangleCount: 0,
     computeTime: 0,
-    webgpuSupported: false,
+    drawCalls: 0,
+    genTime: 0,
   });
 
   /** 初始化场景 */
@@ -76,7 +105,7 @@ export default function PointCloudMesh() {
 
     // 场景
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0a0a1a);
+    scene.background = new THREE.Color(0x0a0d12);
     sceneRef.current = scene;
 
     // 相机
@@ -86,43 +115,50 @@ export default function PointCloudMesh() {
       0.1,
       2000,
     );
-    camera.position.set(100, 80, 120);
+    camera.position.set(0, 50, 150);
     cameraRef.current = camera;
 
     // 渲染器
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      powerPreference: 'high-performance',
+    });
     renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x0a0d12, 1);
     containerRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
     // 控制器
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
+    controls.dampingFactor = 0.08;
     controls.autoRotate = autoRotate;
     controls.autoRotateSpeed = 1.0;
     controlsRef.current = controls;
 
     // 光照（用于网格）
-    const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+    const ambientLight = new THREE.AmbientLight(0x404050, 0.5);
     scene.add(ambientLight);
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalLight.position.set(50, 50, 50);
-    scene.add(directionalLight);
-    const directionalLight2 = new THREE.DirectionalLight(0x8080ff, 0.5);
-    directionalLight2.position.set(-50, -50, -50);
+
+    const directionalLight1 = new THREE.DirectionalLight(0xffffff, 1.0);
+    directionalLight1.position.set(100, 100, 100);
+    scene.add(directionalLight1);
+
+    const directionalLight2 = new THREE.DirectionalLight(0x6080ff, 0.5);
+    directionalLight2.position.set(-100, -50, -100);
     scene.add(directionalLight2);
 
-    // 网格辅助
-    const gridHelper = new THREE.GridHelper(200, 20, 0x303050, 0x202030);
-    gridHelper.position.y = -60;
-    scene.add(gridHelper);
+    // 初始化网格重建器
+    reconstructorRef.current = new CPUMarchingCubes();
   }, [autoRotate]);
 
   /** 创建点云 */
   const createPointCloud = useCallback(() => {
     if (!sceneRef.current) return;
+
+    const startTime = performance.now();
 
     // 移除旧的点云
     if (pointCloudRef.current) {
@@ -131,98 +167,173 @@ export default function PointCloudMesh() {
       (pointCloudRef.current.material as THREE.Material).dispose();
     }
 
-    const time = clockRef.current.getElapsedTime() * animSpeed;
-    const { positions, colors } = generatePointCloudData(shape, pointCount, colorScheme, time);
-
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-    const material = new THREE.PointsMaterial({
-      size: pointSize,
-      vertexColors: true,
+    // 生成基础随机数据
+    const basePositions = generateRandomSeeds(pointCount);
+    const randoms = new Float32Array(pointCount);
+    for (let i = 0; i < pointCount; i++) {
+      randoms[i] = Math.random();
+    }
+
+    basePositionsRef.current = basePositions;
+    randomsRef.current = randoms;
+
+    // 设置属性
+    geometry.setAttribute('position', new THREE.BufferAttribute(basePositions, 3));
+    geometry.setAttribute('aBasePosition', new THREE.BufferAttribute(basePositions, 3));
+    geometry.setAttribute('aRandom', new THREE.BufferAttribute(randoms, 1));
+
+    // 创建 uniforms
+    const uniforms = {
+      uTime: { value: 0 },
+      uSize: { value: pointSize },
+      uAnimSpeed: { value: animSpeed },
+      uShape: { value: getShapeIndex(shape) },
+      uColorScheme: { value: colorScheme },
+    };
+    uniformsRef.current = uniforms;
+
+    // 创建 ShaderMaterial
+    const material = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader: pointCloudVertexShader,
+      fragmentShader: pointCloudFragmentShader,
       transparent: true,
-      opacity: 0.9,
-      blending: THREE.AdditiveBlending,
-      sizeAttenuation: true,
       depthWrite: false,
+      blending: THREE.AdditiveBlending,
     });
 
     const points = new THREE.Points(geometry, material);
     sceneRef.current.add(points);
     pointCloudRef.current = points;
 
-    setStats((prev) => ({ ...prev, pointCount }));
-  }, [shape, colorScheme, pointCount, pointSize, animSpeed]);
-
-  /** 初始化 WebGPU 网格重建器 */
-  const initReconstructor = useCallback(async () => {
-    const reconstructor = new MeshReconstructor();
-    const success = await reconstructor.init();
-    if (success) {
-      reconstructorRef.current = reconstructor;
-      setStats((prev) => ({ ...prev, webgpuSupported: true }));
-    } else {
-      setStats((prev) => ({ ...prev, webgpuSupported: false }));
-    }
-    return success;
-  }, []);
+    const genTime = performance.now() - startTime;
+    setStats((prev) => ({ ...prev, pointCount, genTime }));
+  }, [pointCount, pointSize, animSpeed, shape, colorScheme]);
 
   /** 执行网格重建 */
   const reconstructMesh = useCallback(async () => {
-    if (!reconstructorRef.current || !sceneRef.current) return;
+    if (!reconstructorRef.current || !sceneRef.current || !basePositionsRef.current) return;
 
-    const time = clockRef.current.getElapsedTime() * animSpeed;
-    const { positions, colors } = generatePointCloudData(shape, pointCount, colorScheme, time);
+    setIsRebuilding(true);
 
-    reconstructorRef.current.params.isoValue = isoValue;
-    reconstructorRef.current.params.splatRadius = splatRadius;
-    reconstructorRef.current.setPointCloud(positions, colors, pointCount, gridResolution);
+    // 使用 setTimeout 让 UI 有机会更新
+    await new Promise<void>((resolve) => {
+      setTimeout(() => {
+        try {
+          const startTime = performance.now();
 
-    const result: ReconstructResult | null = await reconstructorRef.current.reconstruct();
-    if (!result || result.triangleCount === 0) return;
+          // 获取当前时间用于动画状态
+          const currentTime = timeRef.current * animSpeed;
 
-    // 移除旧的网格
-    if (meshRef.current) {
+          // 生成点云位置和颜色数据
+          const { positions, colors } = generatePointCloudData(
+            shape,
+            basePositionsRef.current!,
+            pointCount,
+            colorScheme,
+            currentTime,
+          );
+
+          // 设置重建参数
+          reconstructorRef.current!.gridSize = [gridResolution, gridResolution, gridResolution];
+          reconstructorRef.current!.isoValue = isoValue;
+          reconstructorRef.current!.splatRadius = splatRadius;
+
+          // 执行重建
+          const result: MarchingCubesResult = reconstructorRef.current!.reconstruct(positions, colors, pointCount);
+
+          const computeTime = performance.now() - startTime;
+
+          if (result.triangleCount === 0) {
+            // eslint-disable-next-line no-console
+            console.warn('Mesh reconstruction produced no triangles');
+            setStats((prev) => ({ ...prev, triangleCount: 0, computeTime }));
+            setIsRebuilding(false);
+            resolve();
+            return;
+          }
+
+          // 移除旧网格
+          if (meshRef.current) {
+            sceneRef.current!.remove(meshRef.current);
+            meshRef.current.geometry.dispose();
+            (meshRef.current.material as THREE.Material).dispose();
+          }
+
+          // 创建新网格
+          const meshGeometry = new THREE.BufferGeometry();
+          meshGeometry.setAttribute('position', new THREE.BufferAttribute(result.positions, 3));
+          meshGeometry.setAttribute('normal', new THREE.BufferAttribute(result.normals, 3));
+          meshGeometry.setAttribute('color', new THREE.BufferAttribute(result.colors, 3));
+
+          const meshMaterial = new THREE.MeshPhysicalMaterial({
+            vertexColors: true,
+            transparent: true,
+            opacity: meshOpacity,
+            metalness: 0.1,
+            roughness: 0.4,
+            side: THREE.DoubleSide,
+            flatShading: false,
+          });
+
+          const mesh = new THREE.Mesh(meshGeometry, meshMaterial);
+          sceneRef.current!.add(mesh);
+          meshRef.current = mesh;
+
+          // eslint-disable-next-line no-console
+          console.log(`Mesh reconstructed: ${result.triangleCount} triangles in ${computeTime.toFixed(1)}ms`);
+
+          setStats((prev) => ({
+            ...prev,
+            triangleCount: result.triangleCount,
+            computeTime,
+          }));
+        } catch (error) {
+          // eslint-disable-next-line no-console
+          console.error('Mesh reconstruction failed:', error);
+        }
+
+        setIsRebuilding(false);
+        resolve();
+      }, 10);
+    });
+  }, [shape, colorScheme, pointCount, gridResolution, isoValue, splatRadius, meshOpacity, animSpeed]);
+
+  /** 清除网格 */
+  const clearMesh = useCallback(() => {
+    if (meshRef.current && sceneRef.current) {
       sceneRef.current.remove(meshRef.current);
       meshRef.current.geometry.dispose();
       (meshRef.current.material as THREE.Material).dispose();
+      meshRef.current = null;
     }
+  }, []);
 
-    // 创建新网格
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(result.positions, 3));
-    geometry.setAttribute('normal', new THREE.BufferAttribute(result.normals, 3));
-    geometry.setAttribute('color', new THREE.BufferAttribute(result.colors, 3));
-
-    const material = new THREE.MeshPhongMaterial({
-      vertexColors: true,
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: meshOpacity,
-      shininess: 30,
-    });
-
-    const mesh = new THREE.Mesh(geometry, material);
-    sceneRef.current.add(mesh);
-    meshRef.current = mesh;
-
-    setStats((prev) => ({
-      ...prev,
-      triangleCount: result.triangleCount,
-      computeTime: reconstructorRef.current?.lastComputeTime || 0,
-    }));
-  }, [shape, colorScheme, pointCount, gridResolution, isoValue, splatRadius, meshOpacity, animSpeed]);
-
-  /** 更新视图 */
-  const updateView = useCallback(() => {
+  /** 更新视图模式 */
+  const updateViewMode = useCallback((mode: ViewMode) => {
     if (pointCloudRef.current) {
-      pointCloudRef.current.visible = viewMode === 'points';
+      pointCloudRef.current.visible = mode === 'points';
     }
     if (meshRef.current) {
-      meshRef.current.visible = viewMode === 'mesh';
+      meshRef.current.visible = mode === 'mesh';
     }
-  }, [viewMode]);
+  }, []);
+
+  /** 切换网格模式 */
+  const handleToggleMesh = useCallback(
+    async (enabled: boolean) => {
+      if (enabled) {
+        await reconstructMesh();
+        setViewMode('mesh');
+      } else {
+        clearMesh();
+        setViewMode('points');
+      }
+    },
+    [reconstructMesh, clearMesh],
+  );
 
   /** 动画循环 */
   const animate = useCallback(() => {
@@ -230,48 +341,43 @@ export default function PointCloudMesh() {
 
     if (!rendererRef.current || !sceneRef.current || !cameraRef.current) return;
 
+    const now = performance.now();
+
+    // FPS 统计
+    frameCountRef.current++;
+    if (now - lastFpsTimeRef.current >= 1000) {
+      setStats((prev) => ({
+        ...prev,
+        fps: frameCountRef.current,
+        drawCalls: rendererRef.current?.info.render.calls || 0,
+      }));
+      frameCountRef.current = 0;
+      lastFpsTimeRef.current = now;
+    }
+
+    // 更新时间
+    if (isPlaying) {
+      timeRef.current += 0.016;
+    }
+
+    // 更新 uniforms
+    if (uniformsRef.current) {
+      uniformsRef.current.uTime.value = timeRef.current;
+    }
+
     // 更新控制器
     if (controlsRef.current) {
       controlsRef.current.update();
     }
 
-    // 更新点云动画
-    if (isPlaying && viewMode === 'points' && pointCloudRef.current) {
-      const time = clockRef.current.getElapsedTime() * animSpeed;
-      const { positions, colors } = generatePointCloudData(shape, pointCount, colorScheme, time);
-
-      const positionAttr = pointCloudRef.current.geometry.attributes.position as THREE.BufferAttribute;
-      const colorAttr = pointCloudRef.current.geometry.attributes.color as THREE.BufferAttribute;
-
-      positionAttr.array.set(positions);
-      positionAttr.needsUpdate = true;
-      colorAttr.array.set(colors);
-      colorAttr.needsUpdate = true;
-    }
-
     // 渲染
     rendererRef.current.render(sceneRef.current, cameraRef.current);
-
-    // 计算 FPS
-    frameCountRef.current++;
-    const currentTime = performance.now();
-    if (currentTime - lastFpsTimeRef.current >= 1000) {
-      setStats((prev) => ({ ...prev, fps: frameCountRef.current }));
-      frameCountRef.current = 0;
-      lastFpsTimeRef.current = currentTime;
-    }
-  }, [isPlaying, viewMode, shape, colorScheme, pointCount, animSpeed]);
-
-  /** 重建网格按钮点击 */
-  const handleReconstructClick = useCallback(async () => {
-    await reconstructMesh();
-    setViewMode('mesh');
-  }, [reconstructMesh]);
+  }, [isPlaying]);
 
   /** 重置相机 */
   const handleResetCamera = useCallback(() => {
     if (cameraRef.current && controlsRef.current) {
-      cameraRef.current.position.set(100, 80, 120);
+      cameraRef.current.position.set(0, 50, 150);
       controlsRef.current.target.set(0, 0, 0);
       controlsRef.current.update();
     }
@@ -280,7 +386,6 @@ export default function PointCloudMesh() {
   // 初始化
   useEffect(() => {
     initScene();
-    initReconstructor();
 
     return () => {
       cancelAnimationFrame(animationRef.current);
@@ -288,11 +393,8 @@ export default function PointCloudMesh() {
         containerRef.current.removeChild(rendererRef.current.domElement);
         rendererRef.current.dispose();
       }
-      if (reconstructorRef.current) {
-        reconstructorRef.current.destroy();
-      }
     };
-  }, [initScene, initReconstructor]);
+  }, [initScene]);
 
   // 创建初始点云
   useEffect(() => {
@@ -305,10 +407,10 @@ export default function PointCloudMesh() {
     return () => cancelAnimationFrame(animationRef.current);
   }, [animate]);
 
-  // 更新视图
+  // 更新视图模式
   useEffect(() => {
-    updateView();
-  }, [updateView]);
+    updateViewMode(viewMode);
+  }, [viewMode, updateViewMode]);
 
   // 更新自动旋转
   useEffect(() => {
@@ -319,15 +421,36 @@ export default function PointCloudMesh() {
 
   // 更新点大小
   useEffect(() => {
-    if (pointCloudRef.current) {
-      (pointCloudRef.current.material as THREE.PointsMaterial).size = pointSize;
+    if (uniformsRef.current) {
+      uniformsRef.current.uSize.value = pointSize;
     }
   }, [pointSize]);
+
+  // 更新动画速度
+  useEffect(() => {
+    if (uniformsRef.current) {
+      uniformsRef.current.uAnimSpeed.value = animSpeed;
+    }
+  }, [animSpeed]);
+
+  // 更新形态
+  useEffect(() => {
+    if (uniformsRef.current) {
+      uniformsRef.current.uShape.value = getShapeIndex(shape);
+    }
+  }, [shape]);
+
+  // 更新颜色方案
+  useEffect(() => {
+    if (uniformsRef.current) {
+      uniformsRef.current.uColorScheme.value = colorScheme;
+    }
+  }, [colorScheme]);
 
   // 更新网格透明度
   useEffect(() => {
     if (meshRef.current) {
-      (meshRef.current.material as THREE.MeshPhongMaterial).opacity = meshOpacity;
+      (meshRef.current.material as THREE.MeshPhysicalMaterial).opacity = meshOpacity;
     }
   }, [meshOpacity]);
 
@@ -352,19 +475,18 @@ export default function PointCloudMesh() {
       <div ref={containerRef} className={styles.canvasContainer}>
         {/* 状态面板 */}
         <div className={styles.statsPanel}>
-          <div>FPS: {stats.fps}</div>
-          <div>点数: {stats.pointCount.toLocaleString()}</div>
+          <div>当前形态: {SHAPES[shape].name}</div>
+          <div>点数量: {stats.pointCount.toLocaleString()}</div>
+          <div>生成耗时: {stats.genTime.toFixed(1)} ms</div>
+          <div>渲染模式: GPU 着色器 (WebGL)</div>
           {viewMode === 'mesh' && (
             <>
-              <div>三角形: {stats.triangleCount.toLocaleString()}</div>
-              <div>计算时间: {stats.computeTime.toFixed(1)}ms</div>
+              <div>网格三角形: {stats.triangleCount.toLocaleString()}</div>
+              <div>重建耗时: {stats.computeTime.toFixed(1)} ms</div>
             </>
           )}
-          <div style={{ marginTop: 4 }}>
-            <span className={`${styles.webgpuBadge} ${stats.webgpuSupported ? 'supported' : 'unsupported'}`}>
-              WebGPU: {stats.webgpuSupported ? '✓ 支持' : '✗ 不支持'}
-            </span>
-          </div>
+          <div>FPS: {stats.fps}</div>
+          <div>Draw Calls: {stats.drawCalls}</div>
         </div>
       </div>
 
@@ -377,15 +499,15 @@ export default function PointCloudMesh() {
             <Button
               type={viewMode === 'points' ? 'primary' : 'default'}
               icon={<CloudOutlined />}
-              onClick={() => setViewMode('points')}
+              onClick={() => handleToggleMesh(false)}
             >
               点云
             </Button>
             <Button
               type={viewMode === 'mesh' ? 'primary' : 'default'}
               icon={<AppstoreOutlined />}
-              onClick={() => setViewMode('mesh')}
-              disabled={!stats.webgpuSupported}
+              onClick={() => handleToggleMesh(true)}
+              loading={isRebuilding}
             >
               网格
             </Button>
@@ -396,14 +518,14 @@ export default function PointCloudMesh() {
 
         {/* 形态选择 */}
         <div>
-          <div className={styles.sectionTitle}>形态</div>
+          <div className={styles.sectionTitle}>形态选择</div>
           <Select
             value={shape}
             onChange={setShape}
             style={{ width: '100%' }}
             options={getShapeKeys().map((key) => ({
               value: key,
-              label: SHAPES[key].name,
+              label: `${SHAPES[key].icon} ${SHAPES[key].name}`,
             }))}
           />
         </div>
@@ -412,8 +534,8 @@ export default function PointCloudMesh() {
         <div>
           <div className={styles.sectionTitle}>颜色方案</div>
           <Radio.Group value={colorScheme} onChange={(e) => setColorScheme(e.target.value)} size='small'>
-            {COLOR_SCHEMES.map((scheme, index) => (
-              <Radio.Button key={scheme.name} value={index}>
+            {COLOR_SCHEMES.map((scheme) => (
+              <Radio.Button key={scheme.name} value={scheme.value}>
                 {scheme.name}
               </Radio.Button>
             ))}
@@ -424,30 +546,46 @@ export default function PointCloudMesh() {
 
         {/* 点云参数 */}
         <div>
-          <div className={styles.sectionTitle}>点云参数</div>
+          <div className={styles.sectionTitle}>参数控制</div>
 
           <Text type='secondary'>点数量</Text>
           <div className={styles.sliderRow}>
-            <Slider min={1000} max={500000} step={1000} value={pointCount} onChange={setPointCount} />
+            <Slider min={100000} max={1000000} step={100000} value={pointCount} onChange={setPointCount} />
             <InputNumber
-              min={1000}
-              max={500000}
-              step={1000}
+              min={100000}
+              max={1000000}
+              step={100000}
               value={pointCount}
               onChange={(v) => v && setPointCount(v)}
+              formatter={(v) => `${(v || 0) / 10000}万`}
+              style={{ width: 80 }}
             />
           </div>
 
           <Text type='secondary'>点大小</Text>
           <div className={styles.sliderRow}>
             <Slider min={0.5} max={5} step={0.1} value={pointSize} onChange={setPointSize} />
-            <InputNumber min={0.5} max={5} step={0.1} value={pointSize} onChange={(v) => v && setPointSize(v)} />
+            <InputNumber
+              min={0.5}
+              max={5}
+              step={0.1}
+              value={pointSize}
+              onChange={(v) => v && setPointSize(v)}
+              style={{ width: 80 }}
+            />
           </div>
 
           <Text type='secondary'>动画速度</Text>
           <div className={styles.sliderRow}>
             <Slider min={0} max={2} step={0.1} value={animSpeed} onChange={setAnimSpeed} />
-            <InputNumber min={0} max={2} step={0.1} value={animSpeed} onChange={(v) => v !== null && setAnimSpeed(v)} />
+            <InputNumber
+              min={0}
+              max={2}
+              step={0.1}
+              value={animSpeed}
+              onChange={(v) => v !== null && setAnimSpeed(v)}
+              style={{ width: 80 }}
+            />
           </div>
         </div>
 
@@ -455,85 +593,70 @@ export default function PointCloudMesh() {
 
         {/* 网格重建参数 */}
         <div>
-          <div className={styles.sectionTitle}>网格重建参数</div>
+          <div className={styles.sectionTitle}>🔬 网格重建 (CPU Marching Cubes)</div>
 
-          <Text type='secondary'>网格分辨率</Text>
+          <Text type='secondary'>体素分辨率</Text>
           <div className={styles.sliderRow}>
-            <Slider
-              min={32}
-              max={128}
-              step={8}
-              value={gridResolution}
-              onChange={setGridResolution}
-              disabled={!stats.webgpuSupported}
-            />
+            <Slider min={32} max={128} step={8} value={gridResolution} onChange={setGridResolution} />
             <InputNumber
               min={32}
               max={128}
               step={8}
               value={gridResolution}
               onChange={(v) => v && setGridResolution(v)}
-              disabled={!stats.webgpuSupported}
+              formatter={(v) => `${v}³`}
+              style={{ width: 80 }}
             />
           </div>
 
-          <Text type='secondary'>等值面阈值 (Iso Value)</Text>
+          <Text type='secondary'>等值面阈值</Text>
           <div className={styles.sliderRow}>
-            <Slider
-              min={0.1}
-              max={0.9}
-              step={0.05}
-              value={isoValue}
-              onChange={setIsoValue}
-              disabled={!stats.webgpuSupported}
-            />
+            <Slider min={0.1} max={2.0} step={0.1} value={isoValue} onChange={setIsoValue} />
             <InputNumber
               min={0.1}
-              max={0.9}
-              step={0.05}
+              max={2.0}
+              step={0.1}
               value={isoValue}
               onChange={(v) => v && setIsoValue(v)}
-              disabled={!stats.webgpuSupported}
+              style={{ width: 80 }}
             />
           </div>
 
-          <Text type='secondary'>Splat 半径</Text>
+          <Text type='secondary'>散射半径</Text>
           <div className={styles.sliderRow}>
-            <Slider
-              min={0.5}
-              max={5}
-              step={0.1}
-              value={splatRadius}
-              onChange={setSplatRadius}
-              disabled={!stats.webgpuSupported}
-            />
+            <Slider min={0.5} max={3.0} step={0.1} value={splatRadius} onChange={setSplatRadius} />
             <InputNumber
               min={0.5}
-              max={5}
+              max={3.0}
               step={0.1}
               value={splatRadius}
               onChange={(v) => v && setSplatRadius(v)}
-              disabled={!stats.webgpuSupported}
+              style={{ width: 80 }}
             />
           </div>
 
           <Text type='secondary'>网格透明度</Text>
           <div className={styles.sliderRow}>
-            <Slider min={0.1} max={1} step={0.1} value={meshOpacity} onChange={setMeshOpacity} />
-            <InputNumber min={0.1} max={1} step={0.1} value={meshOpacity} onChange={(v) => v && setMeshOpacity(v)} />
+            <Slider min={0.1} max={1.0} step={0.05} value={meshOpacity} onChange={setMeshOpacity} />
+            <InputNumber
+              min={0.1}
+              max={1.0}
+              step={0.05}
+              value={meshOpacity}
+              onChange={(v) => v && setMeshOpacity(v)}
+              style={{ width: 80 }}
+            />
           </div>
 
-          <Tooltip title={!stats.webgpuSupported ? '需要 WebGPU 支持' : ''}>
-            <Button
-              type='primary'
-              block
-              onClick={handleReconstructClick}
-              disabled={!stats.webgpuSupported}
-              style={{ marginTop: 8 }}
-            >
-              执行网格重建
-            </Button>
-          </Tooltip>
+          <Button
+            type='primary'
+            block
+            onClick={() => reconstructMesh()}
+            loading={isRebuilding}
+            style={{ marginTop: 8 }}
+          >
+            重建网格
+          </Button>
         </div>
 
         <div className={styles.divider} />
@@ -558,6 +681,15 @@ export default function PointCloudMesh() {
               </Button>
             </div>
           </Space>
+        </div>
+
+        {/* 操作提示 */}
+        <div style={{ marginTop: 'auto', paddingTop: 16 }}>
+          <Text type='secondary' style={{ fontSize: 11, lineHeight: 1.6, display: 'block' }}>
+            左键旋转 | 右键平移 | 滚轮缩放
+            <br />
+            点击"网格"按钮启用 Marching Cubes 网格重建
+          </Text>
         </div>
       </div>
     </div>
